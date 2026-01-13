@@ -1,0 +1,8 @@
+{
+  "name": "AnonChat Pro - Secure Anonymous Platform",
+  "description": "A high-security, AI-moderated anonymous chat platform featuring WebRTC video/audio, real-time safety scanning, and interest-based matchmaking.",
+  "requestFramePermissions": [
+    "camera",
+    "microphone"
+  ]
+}
