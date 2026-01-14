@@ -10,13 +10,14 @@ interface Props {
   onExit: () => void;
 }
 
-const SLOT_COUNT = 10;
+const GLOBAL_SLOTS = 20; // Expanded slots for better discovery
+const INTEREST_SLOTS = 10;
 
 const ChatRoom: React.FC<Props> = ({ user, onExit }) => {
   const [messages, setMessages] = useState<Message[]>([]);
   const [inputText, setInputText] = useState('');
   const [status, setStatus] = useState<'searching' | 'connected' | 'disconnected'>('searching');
-  const [searchMode, setSearchMode] = useState<'Interest' | 'Global'>('Interest');
+  const [searchPool, setSearchPool] = useState<string>('');
   const [isMuted, setIsMuted] = useState(false);
   const [isVideoOff, setIsVideoOff] = useState(false);
   const [peerData, setPeerData] = useState<any>(null);
@@ -26,6 +27,7 @@ const ChatRoom: React.FC<Props> = ({ user, onExit }) => {
   const signalingRef = useRef<SignalingService | null>(null);
   const chatEndRef = useRef<HTMLDivElement>(null);
   const localStreamRef = useRef<MediaStream | null>(null);
+  const isMatchingRef = useRef(false);
 
   const scrollToBottom = () => {
     chatEndRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -51,89 +53,108 @@ const ChatRoom: React.FC<Props> = ({ user, onExit }) => {
       call.on('stream', (remoteStream: MediaStream) => {
         if (remoteVideoRef.current) remoteVideoRef.current.srcObject = remoteStream;
       });
+      setStatus('connected');
     }
   }, []);
 
+  const cleanCurrentSession = useCallback(() => {
+    signalingRef.current?.close();
+    signalingRef.current = null;
+    if (remoteVideoRef.current) remoteVideoRef.current.srcObject = null;
+    setMessages([]);
+    setStatus('searching');
+    setPeerData(null);
+  }, []);
+
   const startMatching = useCallback(async () => {
+    if (isMatchingRef.current) return;
+    isMatchingRef.current = true;
+    
+    cleanCurrentSession();
+    
     try {
-      // 1. Setup Media
-      const stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
-      localStreamRef.current = stream;
-      if (localVideoRef.current) localVideoRef.current.srcObject = stream;
-
-      // 2. Interest Match Attempt
-      const interest = user.interests[0]?.toLowerCase() || 'global';
-      
-      // We generate a temp ID to scan others
-      const scannerId = `scanner-${generateId()}`;
-      const sig = new SignalingService(
-        scannerId,
-        (msg) => setMessages(prev => [...prev, { id: generateId(), senderId: msg.from, text: msg.text, timestamp: msg.timestamp, type: 'text' }]),
-        (peerId, metadata) => {
-          setStatus('connected');
-          setPeerData(metadata);
-        }
-      );
-      signalingRef.current = sig;
-
-      const tryConnectToPool = async (poolName: string) => {
-        for (let i = 1; i <= SLOT_COUNT; i++) {
-          const targetId = `anonchat-${poolName}-slot-${i}`;
-          console.log(`Searching: ${targetId}`);
-          const success = await sig.connectToPeer(targetId, { username: user.username, interests: user.interests });
-          if (success) {
-            // Found a host! Call them.
-            const call = sig.peer?.call(targetId, localStreamRef.current!);
-            call?.on('stream', (remoteStream) => {
-              if (remoteVideoRef.current) remoteVideoRef.current.srcObject = remoteStream;
-            });
-            return true;
-          }
-        }
-        return false;
-      };
-
-      // Try Interest first
-      let matched = await tryConnectToPool(interest);
-      
-      if (!matched && interest !== 'global') {
-        setSearchMode('Global');
-        matched = await tryConnectToPool('global');
+      // Setup Media if not already active
+      if (!localStreamRef.current) {
+        const stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
+        localStreamRef.current = stream;
+        if (localVideoRef.current) localVideoRef.current.srcObject = stream;
       }
 
-      if (!matched) {
-        // 3. No one to call? BECOME THE HOST.
-        // Try to occupy a slot 1-10 in the global pool
-        sig.close(); // Close scanner
-        
-        let hostId = '';
-        for (let i = 1; i <= SLOT_COUNT; i++) {
-          const potId = `anonchat-global-slot-${i}`;
-          // In a real app, PeerJS would throw an error if ID is taken.
-          // We'll try to become this ID.
-          hostId = potId;
-          break; // For this demo, we assume first available or just pick one
-        }
+      const interest = user.interests[0]?.toLowerCase();
+      const pools = interest ? [interest, 'global'] : ['global'];
+      
+      let matched = false;
 
-        // Final Host Identity
-        signalingRef.current = new SignalingService(
-          `anonchat-global-slot-${Math.floor(Math.random() * SLOT_COUNT) + 1}`,
+      for (const pool of pools) {
+        if (matched) break;
+        setSearchPool(pool.toUpperCase());
+        
+        // 1. Try to call existing slots
+        const slots = pool === 'global' ? GLOBAL_SLOTS : INTEREST_SLOTS;
+        // Shuffle slots for better distribution
+        const slotIndices = Array.from({length: slots}, (_, i) => i + 1).sort(() => Math.random() - 0.5);
+
+        const tempScannerId = `scanner-${generateId()}`;
+        const scanner = new SignalingService(
+          tempScannerId,
           (msg) => setMessages(prev => [...prev, { id: generateId(), senderId: msg.from, text: msg.text, timestamp: msg.timestamp, type: 'text' }]),
           (peerId, metadata) => {
-            setStatus('connected');
             setPeerData(metadata);
-            addSystemMessage('Stranger joined your room!');
+            setStatus('connected');
+            addSystemMessage('Matched with a human!');
           }
         );
 
-        signalingRef.current.peer?.on('call', handleIncomingCall);
-        addSystemMessage('Waiting for someone to join...');
+        for (const slot of slotIndices) {
+          const targetId = `v5-pool-${pool}-slot-${slot}`;
+          const success = await scanner.connectToPeer(targetId, { username: user.username, interests: user.interests });
+          if (success) {
+            signalingRef.current = scanner;
+            const call = scanner.peer?.call(targetId, localStreamRef.current!);
+            call?.on('stream', (remoteStream) => {
+              if (remoteVideoRef.current) remoteVideoRef.current.srcObject = remoteStream;
+            });
+            matched = true;
+            break;
+          }
+        }
+
+        if (!matched) scanner.close();
+      }
+
+      if (!matched) {
+        // 2. Become a host in Global pool if no interest match was found
+        const randomSlot = Math.floor(Math.random() * GLOBAL_SLOTS) + 1;
+        const hostId = `v5-pool-global-slot-${randomSlot}`;
+        
+        const host = new SignalingService(
+          hostId,
+          (msg) => setMessages(prev => [...prev, { id: generateId(), senderId: msg.from, text: msg.text, timestamp: msg.timestamp, type: 'text' }]),
+          (peerId, metadata) => {
+            setPeerData(metadata);
+            setStatus('connected');
+            addSystemMessage('Stranger connected to you!');
+          },
+          () => {
+             // ID Taken callback: Someone else is hosting this slot! 
+             // Restart and we'll probably catch them in the "scanner" phase next loop.
+             isMatchingRef.current = false;
+             setTimeout(startMatching, 500);
+          }
+        );
+
+        signalingRef.current = host;
+        host.peer?.on('call', handleIncomingCall);
+        setSearchPool('GLOBAL WAITING');
+        addSystemMessage('You are now live. Waiting for someone to join...');
       }
 
     } catch (err) {
-      addSystemMessage('Camera/Mic permission denied.');
+      addSystemMessage('Camera/Mic access is required.');
+    } finally {
+      isMatchingRef.current = false;
     }
-  }, [user.username, user.interests, handleIncomingCall]);
+  }, [user.username, user.interests, handleIncomingCall, cleanCurrentSession]);
 
   useEffect(() => {
     startMatching();
@@ -141,7 +162,11 @@ const ChatRoom: React.FC<Props> = ({ user, onExit }) => {
       localStreamRef.current?.getTracks().forEach(t => t.stop());
       signalingRef.current?.close();
     };
-  }, [startMatching]);
+  }, []);
+
+  const handleNext = () => {
+    startMatching();
+  };
 
   const sendMessage = async () => {
     if (!inputText.trim() || status !== 'connected') return;
@@ -152,9 +177,10 @@ const ChatRoom: React.FC<Props> = ({ user, onExit }) => {
     setMessages(prev => [...prev, newMsg]);
     signalingRef.current?.send(text);
     
-    // Safety
-    const safety = await geminiService.scanText(text);
-    if (!safety.isSafe) addSystemMessage('Warning: Keep it friendly.');
+    // Safety check in background
+    geminiService.scanText(text).then(safety => {
+      if (!safety.isSafe) addSystemMessage('Warning: Your message was flagged for safety.');
+    });
   };
 
   return (
@@ -164,50 +190,72 @@ const ChatRoom: React.FC<Props> = ({ user, onExit }) => {
           <div className="relative bg-slate-900 flex items-center justify-center overflow-hidden">
             {status === 'searching' ? (
               <div className="text-center space-y-4">
-                <div className="w-10 h-10 border-2 border-indigo-500/20 border-t-indigo-500 rounded-full animate-spin mx-auto"></div>
+                <div className="w-12 h-12 border-2 border-indigo-500/10 border-t-indigo-500 rounded-full animate-spin mx-auto"></div>
                 <div className="space-y-1">
-                  <p className="text-[10px] text-indigo-400 font-bold uppercase tracking-[0.2em] animate-pulse">Searching {searchMode}</p>
-                  <p className="text-[8px] text-slate-500 uppercase tracking-widest">Finding humans...</p>
+                  <p className="text-[10px] text-indigo-400 font-black tracking-[0.3em] uppercase animate-pulse">{searchPool}</p>
+                  <p className="text-[8px] text-slate-500 uppercase tracking-widest">Looking for humans...</p>
                 </div>
               </div>
             ) : (
               <video ref={remoteVideoRef} autoPlay playsInline className="w-full h-full object-cover" />
             )}
+            <div className="absolute top-4 left-4 flex items-center gap-2">
+               <div className={`w-2 h-2 rounded-full ${status === 'connected' ? 'bg-emerald-500 animate-pulse' : 'bg-amber-500'}`}></div>
+               <span className="text-[8px] font-black uppercase text-white/50 tracking-widest">{status}</span>
+            </div>
             <div className="absolute bottom-3 left-3 px-3 py-1 rounded-lg bg-black/60 backdrop-blur-md text-[9px] font-bold text-white border border-white/10">
-              {status === 'connected' ? (peerData?.username || 'Stranger') : 'Searching...'}
+              {status === 'connected' ? (peerData?.username || 'Stranger') : 'System'}
             </div>
           </div>
 
           <div className="relative bg-slate-900 flex items-center justify-center overflow-hidden">
             <video ref={localVideoRef} autoPlay muted playsInline className={`w-full h-full object-cover scale-x-[-1] ${isVideoOff ? 'hidden' : ''}`} />
-            {isVideoOff && <div className="text-slate-700 text-[10px] font-bold">CAMERA OFF</div>}
+            {isVideoOff && <div className="text-slate-800 text-[10px] font-black tracking-widest">CAMERA INACTIVE</div>}
             <div className="absolute bottom-3 right-3 px-3 py-1 rounded-lg bg-indigo-600/60 backdrop-blur-md text-[9px] font-bold text-white border border-white/10">
               You
             </div>
           </div>
         </div>
 
-        <div className="absolute bottom-6 left-1/2 -translate-x-1/2 flex items-center gap-3 z-30">
-          <button onClick={() => setIsMuted(!isMuted)} className={`w-10 h-10 rounded-xl flex items-center justify-center backdrop-blur-md border border-white/10 transition-all ${isMuted ? 'bg-red-500 text-white' : 'bg-white/10 text-white hover:bg-white/20'}`}>
+        <div className="absolute bottom-6 left-1/2 -translate-x-1/2 flex items-center gap-4 z-40">
+          <button 
+            onClick={() => setIsMuted(!isMuted)} 
+            className={`w-11 h-11 rounded-2xl flex items-center justify-center backdrop-blur-xl border border-white/10 transition-all ${isMuted ? 'bg-rose-500 text-white shadow-lg shadow-rose-500/20' : 'bg-white/10 text-white hover:bg-white/20'}`}
+          >
             <i className={`fa-solid ${isMuted ? 'fa-microphone-slash' : 'fa-microphone'} text-sm`}></i>
           </button>
-          <button onClick={() => window.location.reload()} className="h-10 px-6 bg-indigo-600 hover:bg-indigo-500 text-white text-[10px] font-black rounded-xl shadow-xl shadow-indigo-600/30 flex items-center gap-2 transition-all active:scale-95">
-            SKIP <i className="fa-solid fa-forward"></i>
+          
+          <button 
+            onClick={handleNext} 
+            className="h-11 px-8 bg-indigo-600 hover:bg-indigo-500 text-white text-[11px] font-black rounded-2xl shadow-2xl shadow-indigo-600/40 flex items-center gap-3 transition-all active:scale-95 group"
+          >
+            NEXT STRANGER
+            <i className="fa-solid fa-angles-right text-[10px] group-hover:translate-x-1 transition-transform"></i>
           </button>
-          <button onClick={() => setIsVideoOff(!isVideoOff)} className={`w-10 h-10 rounded-xl flex items-center justify-center backdrop-blur-md border border-white/10 transition-all ${isVideoOff ? 'bg-red-500 text-white' : 'bg-white/10 text-white hover:bg-white/20'}`}>
+          
+          <button 
+            onClick={() => setIsVideoOff(!isVideoOff)} 
+            className={`w-11 h-11 rounded-2xl flex items-center justify-center backdrop-blur-xl border border-white/10 transition-all ${isVideoOff ? 'bg-rose-500 text-white shadow-lg shadow-rose-500/20' : 'bg-white/10 text-white hover:bg-white/20'}`}
+          >
             <i className={`fa-solid ${isVideoOff ? 'fa-video-slash' : 'fa-video'} text-sm`}></i>
           </button>
         </div>
       </div>
 
-      <div className="flex-1 md:w-[420px] flex flex-col bg-slate-950 border-l border-white/5">
+      <div className="flex-1 md:w-[440px] flex flex-col bg-slate-950 border-l border-white/5 relative">
         <div className="flex-1 overflow-y-auto p-4 space-y-4 custom-scrollbar">
+          {messages.length === 0 && status === 'connected' && (
+            <div className="flex flex-col items-center justify-center h-full opacity-20 pointer-events-none">
+              <i className="fa-solid fa-comments text-4xl mb-2"></i>
+              <span className="text-[10px] font-black uppercase tracking-widest">Chat is empty</span>
+            </div>
+          )}
           {messages.map((msg) => (
             <div key={msg.id} className={`flex flex-col ${msg.senderId === 'system' ? 'items-center' : msg.senderId === user.id ? 'items-end' : 'items-start'}`}>
-              <div className={`max-w-[85%] px-4 py-2 rounded-2xl text-sm ${
-                msg.senderId === 'system' ? 'bg-slate-900/50 text-slate-500 text-[10px] font-bold border border-slate-800' :
-                msg.senderId === user.id ? 'bg-indigo-600 text-white rounded-br-none' : 
-                'bg-slate-800 text-slate-200 rounded-bl-none border border-slate-700'
+              <div className={`max-w-[85%] px-4 py-2 rounded-2xl text-sm animate-in fade-in slide-in-from-bottom-1 ${
+                msg.senderId === 'system' ? 'bg-slate-900/50 text-slate-500 text-[9px] font-black uppercase tracking-tighter border border-slate-800' :
+                msg.senderId === user.id ? 'bg-indigo-600 text-white rounded-br-none shadow-lg shadow-indigo-600/10' : 
+                'bg-slate-800 text-slate-200 rounded-bl-none border border-slate-700 shadow-lg'
               }`}>
                 {msg.text}
               </div>
@@ -216,19 +264,23 @@ const ChatRoom: React.FC<Props> = ({ user, onExit }) => {
           <div ref={chatEndRef} />
         </div>
 
-        <div className="p-4 bg-slate-900/50 border-t border-white/5 safe-bottom">
-          <div className="flex items-center gap-2 bg-black/40 border border-slate-800 rounded-xl p-1 focus-within:border-indigo-500/50 transition-colors">
+        <div className="p-4 bg-slate-900/40 border-t border-white/5 safe-bottom">
+          <div className="flex items-center gap-2 bg-black/40 border border-slate-800 rounded-2xl p-1.5 focus-within:border-indigo-500/50 transition-all">
             <input 
               type="text" 
-              placeholder={status === 'connected' ? "Say hello..." : "Waiting for match..."}
+              placeholder={status === 'connected' ? "Type your message..." : "Waiting for human match..."}
               value={inputText}
               onChange={(e) => setInputText(e.target.value)}
               onKeyDown={(e) => e.key === 'Enter' && sendMessage()}
               disabled={status !== 'connected'}
-              className="flex-1 bg-transparent border-none outline-none text-sm px-3 py-2 text-white placeholder:text-slate-600 disabled:opacity-30"
+              className="flex-1 bg-transparent border-none outline-none text-sm px-3 py-1.5 text-white placeholder:text-slate-700 disabled:opacity-20"
             />
-            <button onClick={sendMessage} disabled={!inputText.trim() || status !== 'connected'} className="w-9 h-9 bg-indigo-600 hover:bg-indigo-500 disabled:bg-slate-800 text-white rounded-lg flex items-center justify-center transition-all">
-              <i className="fa-solid fa-arrow-up text-xs"></i>
+            <button 
+              onClick={sendMessage} 
+              disabled={!inputText.trim() || status !== 'connected'} 
+              className="w-10 h-10 bg-indigo-600 hover:bg-indigo-500 disabled:bg-slate-800 text-white rounded-xl flex items-center justify-center transition-all active:scale-90"
+            >
+              <i className="fa-solid fa-paper-plane text-xs"></i>
             </button>
           </div>
         </div>

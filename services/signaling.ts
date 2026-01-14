@@ -14,15 +14,18 @@ export class SignalingService {
   public connection: any = null;
   private onMessageCallback: (msg: SignalingMessage) => void;
   private onPeerConnectedCallback: (peerId: string, metadata: any) => void;
+  private onIdTakenCallback?: () => void;
 
   constructor(
     userId: string, 
     onMessage: (msg: SignalingMessage) => void,
-    onPeerConnected: (peerId: string, metadata: any) => void
+    onPeerConnected: (peerId: string, metadata: any) => void,
+    onIdTaken?: () => void
   ) {
     this.userId = userId;
     this.onMessageCallback = onMessage;
     this.onPeerConnectedCallback = onPeerConnected;
+    this.onIdTakenCallback = onIdTaken;
     this.initPeer(userId);
   }
 
@@ -41,7 +44,7 @@ export class SignalingService {
 
     this.peer.on('connection', (conn) => {
       if (this.connection) {
-        conn.close(); // Only 1-on-1
+        conn.close();
         return;
       }
       this.connection = conn;
@@ -49,7 +52,10 @@ export class SignalingService {
       this.onPeerConnectedCallback(conn.peer, conn.metadata);
     });
 
-    this.peer.on('error', (err) => {
+    this.peer.on('error', (err: any) => {
+      if (err.type === 'unavailable-id') {
+        this.onIdTakenCallback?.();
+      }
       console.warn('Peer error:', err.type);
     });
   }
@@ -67,12 +73,16 @@ export class SignalingService {
     return new Promise((resolve) => {
       if (!this.peer || this.peer.destroyed) return resolve(false);
 
-      const conn = this.peer.connect(peerId, { metadata, serialization: 'json' });
+      const conn = this.peer.connect(peerId, { 
+        metadata, 
+        serialization: 'json',
+        reliable: true 
+      });
       
       const timeout = setTimeout(() => {
         conn.close();
         resolve(false);
-      }, 2500);
+      }, 1500); // Aggressive timeout for faster scanning
 
       conn.on('open', () => {
         clearTimeout(timeout);
@@ -106,5 +116,7 @@ export class SignalingService {
   close() {
     if (this.connection) this.connection.close();
     if (this.peer) this.peer.destroy();
+    this.peer = null;
+    this.connection = null;
   }
 }
