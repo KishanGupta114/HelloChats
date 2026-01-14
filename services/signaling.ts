@@ -1,41 +1,77 @@
 
-/**
- * In a real production app, this would be a WebSocket / Socket.io server.
- * For this demo, we use BroadcastChannel to allow two tabs in the same browser
- * to find each other and establish a WebRTC connection.
- */
+import Peer from 'peerjs';
 
-type SignalingMessage = {
-  type: 'offer' | 'answer' | 'candidate' | 'discovery' | 'found';
+export type SignalingMessage = {
+  type: 'chat' | 'system' | 'ai_response';
   from: string;
-  to?: string;
-  payload?: any;
+  text: string;
+  timestamp: number;
 };
 
 export class SignalingService {
-  private channel: BroadcastChannel;
-  private onMessageCallback: (msg: SignalingMessage) => void;
+  public peer: Peer;
   public userId: string;
+  private connection: any = null;
+  private onMessageCallback: (msg: SignalingMessage) => void;
+  private onPeerConnectedCallback: (peerId: string, metadata: any) => void;
 
-  constructor(userId: string, onMessage: (msg: SignalingMessage) => void) {
+  constructor(
+    userId: string, 
+    onMessage: (msg: SignalingMessage) => void,
+    onPeerConnected: (peerId: string, metadata: any) => void
+  ) {
     this.userId = userId;
-    this.channel = new BroadcastChannel('anon_chat_signaling');
     this.onMessageCallback = onMessage;
-    this.channel.onmessage = (event) => {
-      const msg = event.data as SignalingMessage;
-      if (msg.to === this.userId || !msg.to) {
-        if (msg.from !== this.userId) {
-          this.onMessageCallback(msg);
-        }
+    this.onPeerConnectedCallback = onPeerConnected;
+
+    // Initialize PeerJS with a random ID or the provided userId
+    this.peer = new Peer(this.userId, {
+      debug: 1,
+      config: {
+        iceServers: [
+          { urls: 'stun:stun.l.google.com:19302' },
+          { urls: 'stun:global.stun.twilio.com:3478' }
+        ]
       }
-    };
+    });
+
+    this.peer.on('connection', (conn) => {
+      this.connection = conn;
+      this.setupConnectionListeners(conn);
+      this.onPeerConnectedCallback(conn.peer, conn.metadata);
+    });
   }
 
-  send(msg: Omit<SignalingMessage, 'from'>) {
-    this.channel.postMessage({ ...msg, from: this.userId });
+  private setupConnectionListeners(conn: any) {
+    conn.on('data', (data: any) => {
+      this.onMessageCallback(data as SignalingMessage);
+    });
+    conn.on('close', () => {
+      this.connection = null;
+    });
+  }
+
+  connectToPeer(peerId: string, metadata: any) {
+    const conn = this.peer.connect(peerId, { metadata });
+    this.connection = conn;
+    this.setupConnectionListeners(conn);
+  }
+
+  send(text: string) {
+    if (this.connection && this.connection.open) {
+      const msg: SignalingMessage = {
+        type: 'chat',
+        from: this.userId,
+        text,
+        timestamp: Date.now()
+      };
+      this.connection.send(msg);
+      return msg;
+    }
+    return null;
   }
 
   close() {
-    this.channel.close();
+    this.peer.destroy();
   }
 }

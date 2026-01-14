@@ -1,13 +1,31 @@
 
 import { GoogleGenAI, Type } from "@google/genai";
 
-// Use the API key directly from process.env.API_KEY as per guidelines
 const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
 
 export const geminiService = {
   /**
-   * Generates ice-breaker questions based on user interests
+   * Generates a realistic response from an "AI Stranger" to simulate a chat
    */
+  async getAIResponse(history: {role: string, text: string}[], interests: string[]): Promise<string> {
+    try {
+      const chat = ai.chats.create({
+        model: 'gemini-3-flash-preview',
+        config: {
+          systemInstruction: `You are an anonymous person in a chat room. You share these interests: ${interests.join(', ')}. 
+          Be casual, use lowercase sometimes, use slang, and be friendly but brief. 
+          Do not admit you are an AI. Act like a real person named "Stranger".`
+        }
+      });
+      
+      const lastMsg = history[history.length - 1]?.text || "Hi!";
+      const response = await chat.sendMessage({ message: lastMsg });
+      return response.text || "hey! what's up?";
+    } catch (error) {
+      return "That's cool! Tell me more.";
+    }
+  },
+
   async getIceBreakers(interests: string[]): Promise<string[]> {
     try {
       const prompt = `Generate 3 fun, safe, and engaging ice-breaker questions for an anonymous chat between two people who both like: ${interests.join(', ')}. Return only a JSON array of strings.`;
@@ -22,22 +40,17 @@ export const geminiService = {
           }
         }
       });
-      // response.text is a property, safe to use with fallback
       return JSON.parse(response.text || '[]');
-    } catch (error) {
-      console.error("IceBreaker Error:", error);
-      return ["What's your favorite thing about your hobby?", "How did you get started with your interests?", "If you could do anything right now, what would it be?"];
+    } catch {
+      return ["What's your favorite thing about your hobby?", "How did you get started?", "What's the best thing that happened today?"];
     }
   },
 
-  /**
-   * Scans text for toxicity or unsafe content
-   */
   async scanText(text: string): Promise<{ isSafe: boolean; reason?: string }> {
     try {
       const response = await ai.models.generateContent({
         model: 'gemini-3-flash-preview',
-        contents: `Analyze this chat message for safety: "${text}". Is it harmful, abusive, sexually explicit, or hate speech? Respond in JSON format with "isSafe" (boolean) and "reason" (string, optional).`,
+        contents: `Analyze this chat message for safety: "${text}". Respond in JSON format with "isSafe" (boolean) and "reason" (string, optional).`,
         config: {
           responseMimeType: "application/json",
           responseSchema: {
@@ -50,16 +63,12 @@ export const geminiService = {
           }
         }
       });
-      // response.text is a property, safe to use with fallback
       return JSON.parse(response.text || '{"isSafe": true}');
     } catch {
       return { isSafe: true };
     }
   },
 
-  /**
-   * Scans an image (frame) for nudity or unsafe visual content
-   */
   async scanFrame(base64Image: string): Promise<{ isSafe: boolean; blurRequired: boolean }> {
     try {
       const response = await ai.models.generateContent({
@@ -67,11 +76,10 @@ export const geminiService = {
         contents: {
           parts: [
             { inlineData: { data: base64Image.split(',')[1], mimeType: 'image/jpeg' } },
-            { text: "Analyze this video frame for adult content, nudity, or violence. If it's unsafe, return blurRequired: true and isSafe: false. Otherwise, return isSafe: true. Respond in JSON." }
+            { text: "Analyze for nudity or violence. Respond in JSON with isSafe and blurRequired." }
           ]
         },
       });
-      // Safe check for response.text as it might be undefined
       const result = (response.text || "").toLowerCase();
       const isSafe = !result.includes('unsafe') && !result.includes('nudity');
       return { isSafe, blurRequired: !isSafe };

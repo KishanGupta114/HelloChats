@@ -1,5 +1,12 @@
 
-export const generateId = () => Math.random().toString(36).substring(2, 15) + Math.random().toString(36).substring(2, 15);
+export const generateId = () => {
+  const parts = [
+    Math.random().toString(36).substring(2, 7),
+    Math.random().toString(36).substring(2, 7),
+    Date.now().toString(36).slice(-4)
+  ];
+  return parts.join('-');
+};
 
 export const formatTimestamp = (ts: number) => {
   const date = new Date(ts);
